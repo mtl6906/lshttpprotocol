@@ -1,0 +1,5 @@
+{
+	"workerNumber": 8,
+	"connectionNumber": 1024,
+	"buffersize": 2048
+}
