@@ -14,8 +14,8 @@ namespace ls
 		public:
 			HttpProtocol(const std::string &tag, int port);
 			~HttpProtocol() override;
-			void readContext(rpc::Connection *connection) override;
-			void exec(rpc::Connection *connection) override;
+			int readContext(rpc::Connection *connection) override;
+			int exec(rpc::Connection *connection) override;
 			void release(rpc::Connection *connection) override;
 			void putString(rpc::Connection *connection) override;
 			void putFile(rpc::Connection *connection) override;
@@ -25,8 +25,9 @@ namespace ls
 		protected:
 			std::map<std::string, std::map<std::string, http::Response*(*)(http::Request *)>> methodMapper;
 			std::map<std::string, std::string> dirMapper;
-			Pool<Buffer> bufferPool;
 	};
+
+	void errorRequest(http::Request *request, const std::string &code);
 }
 
 #endif

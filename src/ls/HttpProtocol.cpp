@@ -26,99 +26,95 @@ namespace ls
 		request -> getURL() = string("/error?code=") + code;
 	}
 
-	string getHeaderEndMark(io::InputStream &in)
+	string getHeaderEndMark(int &ec, io::InputStream &in)
 	{
-		try
-		{
-			LOGGER(ls::INFO) << "begin: " << in.getBuffer() -> begin() << ls::endl;
-			return in.split("\r\n\r\n", true);
-		}
-		catch(Exception &e)
-		{
-			throw Exception(Exception::LS_ENOCOMPLETE);
-		}
+		LOGGER(ls::INFO) << "begin: " << in.getBuffer() -> begin() << ls::endl;
+		auto text = in.split(ec, "\r\n\r\n", true);
+		if(ec < 0)
+			ec = Exception::LS_ENOCOMPLETE;
+		return text;
 	}
 
-	http::Request* parseRequest(const string &text)
+	http::Request* parseRequest(int &ec, const string &text)
 	{
 		auto request = new http::Request();
-		try
-		{
-			request -> parseFrom(text);
-		}
-		catch(Exception &e)
+		ec = request -> parseFrom(text);
+		if(ec < 0)
 		{
 			LOGGER(ls::INFO) << "parse failed..." << ls::endl;
 			delete request;
-			throw e;
+			return nullptr;
 		}
 		return request;
 	}
 
-	void getBody(io::InputStream &in, http::Request *request)
+	int getBody(io::InputStream &in, http::Request *request)
 	{
-		int contentLength = 0;
-		try
+		int ec = Exception::LS_OK;
+		auto contentLength = request -> getAttribute(ec, "Content-Length");
+		if(ec < 0)
 		{
-			stoi(request -> getAttribute("Content-Length"));
-		}
-		catch(Exception &e)
-		{
+			LOGGER(ls::ERROR) << "error code: " << ec << ls::endl;
 			errorRequest(request, "411");
-			return ;
+			return ec;
 		}
-		try
+		int len = stoi(contentLength);
+		auto text = in.split(ec, contentLength);
+		if(ec < 0)
 		{
-			auto text = in.split(contentLength);
-			request -> setBody(new http::StringBody(text, ""));
+			ec = Exception::LS_ENOCOMPLETE;
+			return ec;
 		}
-		catch(Exception &e)
-		{
-			throw Exception(Exception::LS_ENOCOMPLETE);
-		}
+		request -> setBody(new http::StringBody(text, ""));
+		return ec;
 	}
 
-	void HttpProtocol::readContext(rpc::Connection *connection)
+	int HttpProtocol::readContext(rpc::Connection *connection)
 	{
-		connection -> isRelease = true;
+		int ec = Exception::LS_OK;
 		auto in = connection -> getInputStream();
-		try
-		{
-			in.tryRead();
-		}
-		catch(Exception &e)
-		{
-			if(e.getCode() != Exception::LS_EWOULDBLOCK)
-				throw e;
-		}
+		ec = in.tryRead();
+		if(ec < 0 && ec != Exception::LS_EWOULDBLOCK)
+			return ec;
 		if(connection -> request == nullptr)
 		{
-			string headerText = getHeaderEndMark(in);
-			connection -> request = parseRequest(headerText);
+			string headerText = getHeaderEndMark(ec, in);
+			if(ec < 0)
+				return ec;
+			connection -> request = parseRequest(ec, headerText);
+			if(ec < 0)
+				return ec;
 		}
 		auto request = (http::Request *)connection -> request;
+		auto keepalive = request -> getAttribute(ec, "Connection");
+		if(ec < 0 || keepalive != "keep-alive")
+			connection -> keepalive = false;
+		else
+			connection -> keepalive = true;
 		if(request -> getMethod() == "GET")
-			return;
+			return Exception::LS_OK;
 		LOGGER(ls::INFO) << "request with body..." << ls::endl;
-		getBody(in, request);
+		ec = getBody(in, request);
+		return ec;
 	}
 
-	void HttpProtocol::exec(rpc::Connection *connection)
+	int HttpProtocol::exec(rpc::Connection *connection)
 	{
+		int ec;
 		LOGGER(ls::INFO) << "map method" << ls::endl;
 		auto request = (http::Request *)connection -> request;
 		auto URL = http::Url(request -> getURL());
 		auto &uri = URL.uri;
 		auto &dirKey = URL.part[0];
 		auto &methods = methodMapper[request -> getMethod()];
-		auto method = methods.find(uri);
+		auto method = methods.find(dirKey);
 	//	dynamic response
 		if(method != methods.end())
 		{
 			LOGGER(ls::INFO) << "dynamic" << ls::endl;
 			connection -> response = method -> second(request);
 			putString(connection);
-			return;
+			return Exception::LS_OK;
 		}
 	//	static response
 		string dir;
@@ -142,13 +138,14 @@ namespace ls
 			response -> setBody(new http::FileBody(uri));
 			connection -> response = response;
 			putFile(connection);
-			return;
+			return Exception::LS_OK;
 		}
 	//	not found error response
 		LOGGER(ls::INFO) << "error" << ls::endl;
 		errorRequest(request, "404");
-		connection -> response = methodMapper["GET"]["/error"](request);
+		connection -> response = methodMapper["GET"]["error"](request);
 		putString(connection);
+		return Exception::LS_OK;
 	}
 
 	void HttpProtocol::putFile(rpc::Connection *connection)
@@ -187,9 +184,15 @@ namespace ls
 	{
 		LOGGER(ls::INFO) << "release request and response" << ls::endl;
 		if(connection -> request != nullptr)
+		{
 			delete (http::Request *)connection -> request;
+			connection -> request = nullptr;
+		}
 		if(connection -> response != nullptr)
+		{
 			delete (http::Response *)connection -> response;
+			connection -> response = nullptr;
+		}
 	}
 
 	file::File *HttpProtocol::getFile(rpc::Connection *connection)
