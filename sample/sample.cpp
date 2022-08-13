@@ -36,6 +36,17 @@ http::Response *getTable(http::Request *request)
 	return response;
 }
 
+http::Response *hello2(http::Request *request)
+{
+	static auto response = new http::Response();
+	if(response)
+		return response;
+	response -> setDefaultHeader(*request);
+	response -> setCode("200");
+	response -> setBody(new http::StringBody("hello", "text/plain"));
+	return response;
+}
+
 string resp(Exception &e)
 {
 	json::Object resp;
@@ -140,6 +151,7 @@ int main(int argc, char **argv)
 	hp -> add("GET", "table", getTable);
 //	hp -> add("POST", "pasteboard", pasteboard);
 	hp -> add("hello1", "/home/mtl/old/mtl/code/lib/HttpProtocol/build");
+	hp -> add("GET", "hello2", hello2);
 //	hp -> add("POST", "signUp", signUp);
 //	hp -> add("POST", "sendCode", sendCode);
 //	hp -> add("POST", "signIn", signIn);
