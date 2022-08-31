@@ -1,9 +1,8 @@
 #include "ls/HttpProtocol.h"
 #include "ls/http/Url.h"
-#include "ls/http/StringBody.h"
-#include "ls/http/FileBody.h"
 #include "ls/file/API.h"
-
+#include "ls/http/Request.h"
+#include "ls/http/Response.h"
 
 using namespace std;
 
@@ -35,28 +34,15 @@ namespace ls
 		return text;
 	}
 
-	http::Request* parseRequest(int &ec, const string &text)
-	{
-		auto request = new http::Request();
-		ec = request -> parseFrom(text);
-		if(ec < 0)
-		{
-			LOGGER(ls::INFO) << "parse failed..." << ls::endl;
-			delete request;
-			return nullptr;
-		}
-		return request;
-	}
-
 	int getBody(io::InputStream &in, http::Request *request)
 	{
 		int ec = Exception::LS_OK;
-		auto contentLength = request -> getAttribute(ec, "Content-Length");
-		if(ec < 0)
+		auto contentLength = request -> getAttribute("Content-Length");
+		if(contentLength == "")
 		{
 			LOGGER(ls::ERROR) << "error code: " << ec << ls::endl;
 			errorRequest(request, "411");
-			return ec;
+			return Exception::LS_ENOCONTENT;
 		}
 		int len = stoi(contentLength);
 		auto text = in.split(ec, contentLength);
@@ -65,7 +51,7 @@ namespace ls
 			ec = Exception::LS_ENOCOMPLETE;
 			return ec;
 		}
-		request -> setBody(new http::StringBody(text, ""));
+		request -> getBody() = std::move(text);
 		return ec;
 	}
 
@@ -76,25 +62,25 @@ namespace ls
 		ec = in.tryRead();
 		if(ec < 0 && ec != Exception::LS_EWOULDBLOCK)
 			return ec;
-		if(connection -> request == nullptr)
+		if(request.getMethod() == "")
 		{
 			string headerText = getHeaderEndMark(ec, in);
 			if(ec < 0)
 				return ec;
-			connection -> request = parseRequest(ec, headerText);
+			ec = request.parseFrom(headerText);
 			if(ec < 0)
 				return ec;
 		}
-		auto request = (http::Request *)connection -> request;
-		auto keepalive = request -> getAttribute(ec, "Connection");
-		if(ec < 0 || keepalive != "keep-alive")
+		auto keepalive = request.getConnection();
+		if(keepalive != "keep-alive")
 			connection -> keepalive = false;
 		else
 			connection -> keepalive = true;
-		if(request -> getMethod() == "GET")
+		LOGGER(ls::INFO) << connection -> keepalive << endl;
+		if(request.getMethod() == "GET")
 			return Exception::LS_OK;
 		LOGGER(ls::INFO) << "request with body..." << ls::endl;
-		ec = getBody(in, request);
+		ec = getBody(in, &request);
 		return ec;
 	}
 
@@ -102,17 +88,26 @@ namespace ls
 	{
 		int ec;
 		LOGGER(ls::INFO) << "map method" << ls::endl;
-		auto request = (http::Request *)connection -> request;
-		auto URL = http::Url(request -> getURL());
+		auto URL = http::Url(request.getURL());
 		auto &uri = URL.uri;
 		auto &dirKey = URL.part[0];
-		auto &methods = methodMapper[request -> getMethod()];
+	//	fast file
+		auto fastfileIt = fastfileMapper.find(dirKey);
+		if(fastfileIt != fastfileMapper.end())
+		{
+			connection -> sendBuffer.push(fastfileIt -> second);
+			connection -> file.reset(nullptr);
+			LOGGER(ls::INFO) << fastfileIt -> second << ls::endl;
+			return Exception::LS_OK;	
+		}
+		auto &methods = methodMapper[request.getMethod()];
 		auto method = methods.find(dirKey);
 	//	dynamic response
+		response.reset(&connection -> sendBuffer);
 		if(method != methods.end())
 		{
 			LOGGER(ls::INFO) << "dynamic" << ls::endl;
-			connection -> response = method -> second(request);
+			method -> second(request, response);
 			putString(connection);
 			return Exception::LS_OK;
 		}
@@ -132,43 +127,33 @@ namespace ls
 		if(dir != "" && file::api.exist(URL.uri))
 		{
 			LOGGER(ls::INFO) << "static" << ls::endl;
-			auto response = new http::Response();
-			response -> setDefaultHeader(*request);
-			response -> setCode("200");
-			response -> setBody(new http::FileBody(uri));
-			connection -> response = response;
+			response.setResponseLine("200", request.getVersion());
+			response.setHeaderByRequest(request);
+			response.setFileBody(uri);
 			putFile(connection);
 			return Exception::LS_OK;
 		}
 	//	not found error response
 		LOGGER(ls::INFO) << "error" << ls::endl;
-		errorRequest(request, "404");
-		connection -> response = methodMapper["GET"]["error"](request);
+		errorRequest(&request, "404");
+		methodMapper["GET"]["error"](request, response);
 		putString(connection);
 		return Exception::LS_OK;
 	}
 
 	void HttpProtocol::putFile(rpc::Connection *connection)
 	{
-		auto response = (http::Response *)connection -> response;
-		auto header = response -> toString();
-		connection -> staticSendBuffer -> push(header);
-		connection -> responseType = "static";
+		connection -> file.reset(response.getFile());
 	}
 
 	void HttpProtocol::putString(rpc::Connection *connection)
 	{
-		auto response = (http::Response *)connection -> response;
-		auto header = response -> toString();
-		connection -> staticSendBuffer -> push(header);
-		auto *body = response -> getBody();
-		string text;
-		body -> getData(&text);
-		connection -> dynamicSendBuffer = new Buffer(text);
-		connection -> responseType = "dynamic";
+//		connection -> staticSendBuffer -> push("Content-Type: text/plain\r\n");
+//		connection -> staticSendBuffer -> push("Content-Length: 10\r\n\r\nhelloworld");
+		connection -> file.reset(nullptr);
 	}
 
-	void HttpProtocol::add(const string &method, const string &key, http::Response *(*func)(http::Request *request))
+	void HttpProtocol::add(const string &method, const string &key, int(*func)(http::Request &request, http::Response &response))
 	{
 		methodMapper[method][key] = func;
 	}
@@ -180,27 +165,34 @@ namespace ls
 		LOGGER(ls::INFO) << "add directory [" << key << "," << value << "]" << ls::endl;
 	}	
 
+	void HttpProtocol::addfile(const string &key, const string &path)
+	{
+		if(file::api.exist(path) == true)
+		{
+			auto file = file::api.get(path);
+			Buffer buffer(8096);
+			io::InputStream in(file -> getReader(), &buffer);
+			in.read();	
+			auto data = in.split();
+			http::Response _response;
+			_response.reset(&buffer);
+			_response.setResponseLine("200", "HTTP/1.1");
+			_response.setAttribute("Connection", "keep-alive");
+			_response.setStringBody(data, "text/plain");
+			fastfileMapper[key] = in.split();
+		}
+	}
+
 	void HttpProtocol::release(rpc::Connection *connection)
 	{
 		LOGGER(ls::INFO) << "release request and response" << ls::endl;
-		if(connection -> request != nullptr)
-		{
-			delete (http::Request *)connection -> request;
-			connection -> request = nullptr;
-		}
-		if(connection -> response != nullptr)
-		{
-			delete (http::Response *)connection -> response;
-			connection -> response = nullptr;
-		}
+		connection -> file.reset(nullptr);
+		request.clear();
+		response.clear();	
 	}
 
 	file::File *HttpProtocol::getFile(rpc::Connection *connection)
 	{
-		auto response = (http::Response *)connection -> response;
-		auto *body = response -> getBody();
-		file::File *file;
-		body -> getData(&file);
-		return file;
+		return connection -> file.get();
 	}
 }

@@ -3,48 +3,32 @@
 #include "ls/http/Response.h"
 #include "ls/http/QueryString.h"
 #include "ls/http/Url.h"
-#include "ls/http/StringBody.h"
 #include "ls/file/API.h"
 #include "CASQueueFactory.h"
 
 using namespace ls;
 using namespace std; 
 
-http::Response* hello(http::Request *request)
+int hello(http::Request &request, http::Response &response)
 {
-	static int count = 0;
-	string text = string("hello, ") + to_string(++count);
-	auto response = new http::Response();
-	response -> setDefaultHeader(*request);
-	response -> setCode("200");
-	response -> setBody(new http::StringBody(text, "text/plain"));
-	return response;
+	response.setResponseLine("200", request.getVersion());
+	response.setHeaderByRequest(request);
+	response.setStringBody("helloworld", "text/plain");
+		
+	return Exception::LS_OK;
 }
 
-http::Response *getTable(http::Request *request)
+int getTable(http::Request &request, http::Response &response)
 {
-	http::Response *response = new http::Response();
-	response -> setDefaultHeader(*request);
-	response -> setCode("200");
-
 	unique_ptr<file::File> file(file::api.get("paste_data.txt"));
 	Buffer readBuffer(file -> size());
 	io::InputStream in(file -> getReader(), &readBuffer);
 	in.read();
 	string data = in.split();
-	response -> setBody(new http::StringBody(data, "text/html"));
-	return response;
-}
-
-http::Response *hello2(http::Request *request)
-{
-	static auto response = new http::Response();
-	if(response)
-		return response;
-	response -> setDefaultHeader(*request);
-	response -> setCode("200");
-	response -> setBody(new http::StringBody("hello", "text/plain"));
-	return response;
+	response.setResponseLine("200", request.getVersion());
+	response.setHeaderByRequest(request);
+	response.setStringBody(data, "text/html");
+	return Exception::LS_OK;
 }
 
 string resp(Exception &e)
@@ -109,32 +93,18 @@ http::Response *pasteboard(http::Request *request)
 	return response;
 }
 */
-http::Response *error(http::Request *request)
+int error(http::Request &request, http::Response &response)
 {
 	int ec;
 	http::QueryString qs;
-	auto queryText = http::Url(request -> getURL()).queryText;
+	auto queryText = http::Url(request.getURL()).queryText;
 	string code;
-	while(queryText != "")
-	{
-		ec = qs.parseFrom(queryText);
-		if(ec < 0)
-		{
-			code = "400";
-			break;
-		}
-		code = qs.getParameter(ec, "code");
-		if(ec < 0)
-		{
-			code = "400";
-			break;
-		}
-	}
-	auto response = new http::Response();
-	response -> setDefaultHeader(*request);
-	response -> setCode(code);
-	response -> setBody(new http::StringBody(code, "text/plain"));
-	return response;
+	ec = qs.parseFrom(queryText);
+	code = qs.getParameter("code");
+	response.setResponseLine(code, request.getVersion());
+	response.setHeaderByRequest(request);
+	response.setStringBody(code, "text/plain");
+	return Exception::LS_OK;
 }
 
 int main(int argc, char **argv)
@@ -143,7 +113,7 @@ int main(int argc, char **argv)
 	int port = stoi(argv[1]);
 	CASQueueFactory casqf;
 	rpc::Tool tool(casqf);
-	for(int i=0;i<1;++i)
+	for(int i=0;i<20;++i)
 	{
 	auto hp = new HttpProtocol("http" + to_string(i), port);
 	hp -> add("GET", "hello", hello);
@@ -151,7 +121,7 @@ int main(int argc, char **argv)
 	hp -> add("GET", "table", getTable);
 //	hp -> add("POST", "pasteboard", pasteboard);
 	hp -> add("hello1", "/home/mtl/old/mtl/code/lib/HttpProtocol/build");
-	hp -> add("GET", "hello2", hello2);
+	hp -> addfile("hello2", "config.json");
 //	hp -> add("POST", "signUp", signUp);
 //	hp -> add("POST", "sendCode", sendCode);
 //	hp -> add("POST", "signIn", signIn);

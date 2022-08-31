@@ -20,11 +20,20 @@ namespace ls
 			void putString(rpc::Connection *connection) override;
 			void putFile(rpc::Connection *connection) override;
 			file::File *getFile(rpc::Connection *connection) override;
-			void add(const std::string &method, const std::string &key, http::Response*(*func)(http::Request *request));
+			void add(const std::string &method, const std::string &key, 
+					int(*func)(
+						http::Request &request,
+						http::Response &response
+					)
+			);
 			void add(const std::string &key, const std::string &dir);
+			void addfile(const std::string &key, const std::string &data);
 		protected:
-			std::map<std::string, std::map<std::string, http::Response*(*)(http::Request *)>> methodMapper;
+			std::map<std::string, std::map<std::string, int(*)(http::Request &, http::Response &)>> methodMapper;
 			std::map<std::string, std::string> dirMapper;
+			std::map<std::string, std::string> fastfileMapper;
+			http::Response response;
+			http::Request request;
 	};
 
 	void errorRequest(http::Request *request, const std::string &code);
